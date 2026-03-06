@@ -1,0 +1,13 @@
+node_modules
+npm-debug.log*
+.git
+.gitignore
+.env
+.env.local
+.env.*.local
+.secrets
+.agent-wallets
+mnt
+coverage
+dist
+.DS_Store
