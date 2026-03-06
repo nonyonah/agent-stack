@@ -1,0 +1,302 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>solana-agent-wallet</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=IBM+Plex+Sans:wght@300;400;500&display=swap" rel="stylesheet">
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: #080808; color: #eee; font-family: 'IBM Plex Sans', sans-serif; min-height: 100vh; }
+  @keyframes scan { 0% { transform: translateX(-100%); } 100% { transform: translateX(100%); } }
+  @keyframes fadeSlide { from { opacity: 0; transform: translateY(-6px); } to { opacity: 1; transform: translateY(0); } }
+  @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+  @keyframes glow { 0%, 100% { box-shadow: 0 0 6px currentColor; } 50% { box-shadow: 0 0 14px currentColor; } }
+  ::-webkit-scrollbar { width: 4px; }
+  ::-webkit-scrollbar-track { background: #111; }
+  ::-webkit-scrollbar-thumb { background: #2a2a2a; border-radius: 2px; }
+  .agent-card { background: #0d0d0d; border: 1px solid #1e1e1e; border-radius: 12px; padding: 20px; display: flex; flex-direction: column; gap: 14px; transition: border-color 0.4s; position: relative; overflow: hidden; }
+  .agent-card.running { border-color: var(--strategy-color); }
+  .scan-bar { position: absolute; top: 0; left: 0; right: 0; height: 2px; background: linear-gradient(90deg, transparent, var(--strategy-color), transparent); animation: scan 2s linear infinite; display: none; }
+  .running .scan-bar { display: block; }
+  .btn { border-radius: 8px; font-family: 'Space Mono', monospace; font-size: 11px; padding: 8px 0; cursor: pointer; width: 100%; letter-spacing: 0.08em; transition: all 0.2s; border: 1px solid; }
+  .btn:hover { filter: brightness(1.2); }
+  .tab-btn { flex: 1; padding: 13px 0; background: none; border: none; border-bottom: 2px solid transparent; font-family: 'Space Mono', monospace; font-size: 10px; text-transform: uppercase; letter-spacing: 0.1em; cursor: pointer; transition: all 0.2s; color: #444; }
+  .tab-btn.active { color: #eee; border-bottom-color: #7c6af7; }
+  .feed-row { padding: 8px 14px; background: #0d0d0d; border-bottom: 1px solid #0f0f0f; animation: fadeSlide 0.3s ease; }
+  .decision-row { padding: 10px 14px; background: #0d0d0d; border-bottom: 1px solid #0f0f0f; animation: fadeSlide 0.3s ease; }
+  .status-dot { width: 8px; height: 8px; border-radius: 50%; transition: all 0.3s; }
+  .live-dot { width: 6px; height: 6px; border-radius: 50%; background: #00ff88; animation: pulse 1.5s infinite; }
+</style>
+</head>
+<body>
+
+<div id="app" style="display:flex;flex-direction:column;min-height:100vh;"></div>
+
+<script>
+const STRATEGIES = ["ACCUMULATE", "DISTRIBUTE", "PATROL"];
+const STRATEGY_COLOR = { ACCUMULATE: "#00ff88", DISTRIBUTE: "#7c6af7", PATROL: "#ff8c00" };
+const STRATEGY_BG = { ACCUMULATE: "#0a2a1a", DISTRIBUTE: "#1a1a2a", PATROL: "#2a1a0a" };
+const AGENT_NAMES = ["alpha-01", "beta-02", "gamma-03"];
+const TX_ICON = { airdrop: "⬇", transfer: "→", swap: "⇄", custom: "◆" };
+const TX_COLOR = { airdrop: "#00ff88", transfer: "#7c6af7", swap: "#ff8c00", custom: "#aaa" };
+
+const DECISIONS = {
+  ACCUMULATE: [
+    ["Balance is below minimum threshold. Requesting emergency airdrop.", "airdrop", true],
+    ["Balance healthy. Holding position — no action needed this tick.", "hold", false],
+    ["Accumulation phase active. Waiting for balance to grow.", "hold", false],
+    ["Tick check nominal. SOL reserves adequate.", "hold", false],
+  ],
+  DISTRIBUTE: [
+    ["Balance exceeds distribution threshold. Sending 0.1 SOL to peer.", "transfer", true],
+    ["Peer detected with lower balance. Initiating rebalance transfer.", "transfer", true],
+    ["Balance too low to distribute. Requesting devnet airdrop.", "airdrop", true],
+    ["Threshold not yet met. Accumulating before next distribution.", "wait", false],
+  ],
+  PATROL: [
+    ["Patrol tick 4: switching to distribution mode.", "transfer", true],
+    ["Patrol check: accumulation phase active, holding.", "hold", false],
+    ["Peer balance delta detected. Rebalancing now.", "transfer", true],
+    ["Patrol cycle: monitoring network state.", "hold", false],
+  ],
+};
+
+function rnd(min, max) { return min + Math.random() * (max - min); }
+function id() { return Math.random().toString(36).slice(2, 10); }
+function pubkey() { const a="123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"; return Array.from({length:44},()=>a[Math.floor(Math.random()*58)]).join(""); }
+function sig() { const a="123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"; return Array.from({length:88},()=>a[Math.floor(Math.random()*58)]).join(""); }
+function trunc(s, n=8) { if(!s||s.length<=n*2+3) return s||""; return s.slice(0,n)+"..."+s.slice(-4); }
+function ago(ts) { const s=Math.floor((Date.now()-ts)/1000); if(s<5)return"just now"; if(s<60)return s+"s ago"; return Math.floor(s/60)+"m ago"; }
+
+let state = {
+  agents: AGENT_NAMES.map((name, i) => ({
+    id: id(), name,
+    publicKey: pubkey(),
+    balance: rnd(0.5, 2.0),
+    strategy: STRATEGIES[i],
+    tickCount: 0,
+    isRunning: false,
+    transactions: [],
+    decisions: [{ id: id(), timestamp: Date.now(), reasoning: `Agent ${name} initialized with strategy: ${STRATEGIES[i]}`, action: "init", executed: false, agentName: name }],
+  })),
+  globalTxLog: [],
+  globalDecisionLog: [],
+  activeTab: "transactions",
+  tick: 0,
+  intervalId: null,
+};
+
+function doTick() {
+  state.tick++;
+  state.agents = state.agents.map(agent => {
+    if (!agent.isRunning) return agent;
+    const pool = DECISIONS[agent.strategy];
+    const [reasoning, action, executed] = pool[state.tick % pool.length];
+    const decision = { id: id(), timestamp: Date.now(), reasoning, action, executed, agentName: agent.name };
+
+    let newTx = null;
+    let delta = 0;
+
+    if (action === "airdrop") {
+      delta = 0.5;
+      newTx = { id: id(), timestamp: Date.now(), type: "airdrop", amount: 0.5, status: "confirmed", signature: sig(), agentName: agent.name };
+    } else if (action === "transfer" && agent.balance > 0.15) {
+      delta = -0.1;
+      const peers = state.agents.filter(a => a.id !== agent.id);
+      const peer = peers[state.tick % peers.length];
+      newTx = { id: id(), timestamp: Date.now(), type: "transfer", amount: 0.1, status: "confirmed", signature: sig(), from: agent.publicKey, to: peer?.publicKey, agentName: agent.name };
+    }
+
+    const newDecisions = [decision, ...agent.decisions].slice(0, 25);
+    const newTxs = newTx ? [newTx, ...agent.transactions].slice(0, 25) : agent.transactions;
+    if (newTx) state.globalTxLog = [newTx, ...state.globalTxLog].slice(0, 60);
+    state.globalDecisionLog = [decision, ...state.globalDecisionLog].slice(0, 60);
+
+    return { ...agent, tickCount: agent.tickCount + 1, balance: Math.max(0, agent.balance + delta + (Math.random()-0.5)*0.015), transactions: newTxs, decisions: newDecisions };
+  });
+  render();
+}
+
+function startAgent(agentId) {
+  state.agents = state.agents.map(a => a.id === agentId ? {...a, isRunning: true} : a);
+  if (!state.intervalId) state.intervalId = setInterval(doTick, 3200);
+  render();
+}
+
+function stopAgent(agentId) {
+  state.agents = state.agents.map(a => a.id === agentId ? {...a, isRunning: false} : a);
+  if (!state.agents.some(a => a.isRunning) && state.intervalId) {
+    clearInterval(state.intervalId); state.intervalId = null;
+  }
+  render();
+}
+
+function startAll() {
+  state.agents = state.agents.map(a => ({...a, isRunning: true}));
+  if (!state.intervalId) state.intervalId = setInterval(doTick, 3200);
+  render();
+}
+
+function stopAll() {
+  state.agents = state.agents.map(a => ({...a, isRunning: false}));
+  if (state.intervalId) { clearInterval(state.intervalId); state.intervalId = null; }
+  render();
+}
+
+function setTab(tab) { state.activeTab = tab; render(); }
+
+function render() {
+  const anyRunning = state.agents.some(a => a.isRunning);
+  const totalBalance = state.agents.reduce((s,a) => s+a.balance, 0);
+  const totalTxs = state.agents.reduce((s,a) => s+a.transactions.length, 0);
+
+  document.getElementById("app").innerHTML = `
+    <!-- Header -->
+    <div style="border-bottom:1px solid #1a1a1a;padding:14px 28px;display:flex;justify-content:space-between;align-items:center;background:#080808;position:sticky;top:0;z-index:10;">
+      <div style="display:flex;align-items:center;gap:14px;">
+        <div style="font-family:'Space Mono',monospace;font-size:17px;font-weight:700;color:#fff;letter-spacing:-0.02em;">solana-agent-wallet</div>
+        <div style="font-size:9px;color:#555;font-family:monospace;background:#111;border:1px solid #1e1e1e;padding:2px 8px;border-radius:4px;letter-spacing:0.1em;">DEVNET</div>
+      </div>
+      <div style="display:flex;gap:20px;align-items:center;">
+        <div style="text-align:right;">
+          <div style="font-size:9px;color:#444;font-family:monospace;text-transform:uppercase;letter-spacing:0.1em;">total SOL</div>
+          <div style="font-size:16px;color:#fff;font-family:'Space Mono',monospace;font-weight:700;">${totalBalance.toFixed(3)}</div>
+        </div>
+        <div style="text-align:right;">
+          <div style="font-size:9px;color:#444;font-family:monospace;text-transform:uppercase;letter-spacing:0.1em;">txns</div>
+          <div style="font-size:16px;color:#fff;font-family:'Space Mono',monospace;font-weight:700;">${totalTxs}</div>
+        </div>
+        <button onclick="${anyRunning ? 'stopAll()' : 'startAll()'}" style="background:${anyRunning?'#1a0a0a':'#001a0a'};border:1px solid ${anyRunning?'#ff4444':'#00ff88'};border-radius:8px;color:${anyRunning?'#ff6666':'#00ff88'};font-family:'Space Mono',monospace;font-size:11px;padding:8px 18px;cursor:pointer;letter-spacing:0.08em;">
+          ${anyRunning ? '■ &nbsp;STOP ALL' : '▶ &nbsp;START ALL'}
+        </button>
+      </div>
+    </div>
+
+    <!-- Body -->
+    <div style="flex:1;display:grid;grid-template-columns:1fr 370px;min-height:calc(100vh - 57px);">
+
+      <!-- Agent Cards -->
+      <div style="padding:28px;border-right:1px solid #111;overflow-y:auto;">
+        <div style="display:flex;align-items:center;gap:12px;margin-bottom:22px;">
+          <span style="font-family:'Space Mono',monospace;font-size:11px;color:#444;text-transform:uppercase;letter-spacing:0.12em;">agents</span>
+          <div style="flex:1;height:1px;background:#1a1a1a;"></div>
+          <span style="font-size:10px;color:#333;font-family:monospace;">${state.agents.filter(a=>a.isRunning).length}/${state.agents.length} running</span>
+        </div>
+        <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:14px;">
+          ${state.agents.map(agent => renderAgentCard(agent)).join("")}
+        </div>
+        <div style="margin-top:28px;display:flex;gap:18px;">
+          ${Object.keys(STRATEGY_COLOR).map(s => `
+            <div style="display:flex;align-items:center;gap:7px;">
+              <div style="width:8px;height:8px;border-radius:2px;background:${STRATEGY_COLOR[s]};"></div>
+              <span style="font-size:10px;color:#444;font-family:monospace;">${s}</span>
+            </div>
+          `).join("")}
+        </div>
+      </div>
+
+      <!-- Feed Panel -->
+      <div style="display:flex;flex-direction:column;background:#0a0a0a;overflow:hidden;">
+        <div style="display:flex;border-bottom:1px solid #1a1a1a;">
+          <button class="tab-btn ${state.activeTab==='transactions'?'active':''}" onclick="setTab('transactions')">Transactions</button>
+          <button class="tab-btn ${state.activeTab==='decisions'?'active':''}" onclick="setTab('decisions')">Decisions</button>
+        </div>
+        ${anyRunning ? `
+          <div style="padding:7px 14px;display:flex;align-items:center;gap:8px;border-bottom:1px solid #111;">
+            <div class="live-dot"></div>
+            <span style="font-size:9px;color:#444;font-family:monospace;letter-spacing:0.1em;text-transform:uppercase;">live feed</span>
+          </div>
+        ` : ''}
+        <div style="flex:1;overflow-y:auto;">
+          ${state.activeTab === 'transactions' ? renderTxFeed() : renderDecisionFeed()}
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function renderAgentCard(agent) {
+  const color = STRATEGY_COLOR[agent.strategy];
+  const bg = STRATEGY_BG[agent.strategy];
+  const latest = agent.decisions[0];
+  return `
+    <div class="agent-card ${agent.isRunning?'running':''}" style="--strategy-color:${color};">
+      <div class="scan-bar"></div>
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;">
+        <div>
+          <div style="display:flex;align-items:center;gap:9px;margin-bottom:4px;">
+            <div class="status-dot" style="background:${agent.isRunning?color:'#2a2a2a'};${agent.isRunning?`box-shadow:0 0 8px ${color};animation:glow 2s infinite;color:${color};`:''}"></div>
+            <span style="font-family:'Space Mono',monospace;font-size:14px;color:#eee;font-weight:700;">${agent.name}</span>
+          </div>
+          <div style="font-family:monospace;font-size:10px;color:#444;letter-spacing:0.04em;">${trunc(agent.publicKey, 10)}</div>
+        </div>
+        <div style="display:flex;flex-direction:column;align-items:flex-end;gap:5px;">
+          <div style="background:${bg};border:1px solid ${color};border-radius:5px;padding:2px 8px;font-size:9px;color:${color};font-family:monospace;letter-spacing:0.1em;">${agent.strategy}</div>
+          <div style="font-size:9px;color:#333;font-family:monospace;">tick #${agent.tickCount}</div>
+        </div>
+      </div>
+
+      <div style="background:#111;border-radius:8px;padding:11px 14px;">
+        <div style="font-size:9px;color:#444;font-family:monospace;margin-bottom:4px;text-transform:uppercase;letter-spacing:0.1em;">balance</div>
+        <div style="font-size:24px;color:#fff;font-family:'Space Mono',monospace;font-weight:700;letter-spacing:-0.02em;">
+          ${agent.balance.toFixed(4)}<span style="font-size:12px;color:#555;margin-left:5px;">SOL</span>
+        </div>
+      </div>
+
+      ${latest ? `
+        <div style="background:#111;border-radius:8px;padding:10px 13px;">
+          <div style="font-size:9px;color:#444;font-family:monospace;margin-bottom:5px;text-transform:uppercase;letter-spacing:0.1em;">last decision</div>
+          <div style="font-size:10px;color:#777;font-family:monospace;line-height:1.55;">${latest.reasoning}</div>
+          <div style="margin-top:5px;font-size:9px;color:#444;font-family:monospace;">→ ${latest.action} · ${ago(latest.timestamp)}</div>
+        </div>
+      ` : ''}
+
+      <button class="btn" onclick="${agent.isRunning ? `stopAgent('${agent.id}')` : `startAgent('${agent.id}')`}"
+        style="background:${agent.isRunning?'#1a0a0a':'#0a1a0a'};border-color:${agent.isRunning?'#ff4444':color};color:${agent.isRunning?'#ff6666':color};">
+        ${agent.isRunning ? '■ &nbsp;STOP AGENT' : '▶ &nbsp;START AGENT'}
+      </button>
+    </div>
+  `;
+}
+
+function renderTxFeed() {
+  if (!state.globalTxLog.length) return `<div style="padding:28px;text-align:center;color:#2a2a2a;font-family:monospace;font-size:12px;">Waiting for transactions...</div>`;
+  return state.globalTxLog.slice(0, 24).map(tx => `
+    <div class="feed-row" style="display:flex;align-items:center;gap:11px;">
+      <span style="font-size:13px;color:${TX_COLOR[tx.type]};width:16px;text-align:center;">${TX_ICON[tx.type]}</span>
+      <div style="flex:1;min-width:0;">
+        <div style="display:flex;gap:8px;align-items:center;">
+          <span style="font-size:10px;color:#555;font-family:monospace;">${tx.agentName}</span>
+          <span style="font-size:10px;color:${TX_COLOR[tx.type]};font-family:monospace;">${tx.type}</span>
+          ${tx.amount ? `<span style="font-size:10px;color:#ccc;font-family:monospace;">${tx.amount} SOL</span>` : ''}
+        </div>
+        ${tx.signature ? `<div style="font-size:8px;color:#2a2a2a;font-family:monospace;margin-top:2px;">${trunc(tx.signature, 14)}</div>` : ''}
+      </div>
+      <div style="font-size:8px;color:#2a2a2a;font-family:monospace;white-space:nowrap;">${ago(tx.timestamp)}</div>
+      <div style="width:5px;height:5px;border-radius:50%;background:${tx.status==='confirmed'?'#00ff88':tx.status==='failed'?'#ff4444':'#ffaa00'};flex-shrink:0;"></div>
+    </div>
+  `).join("");
+}
+
+function renderDecisionFeed() {
+  if (!state.globalDecisionLog.length) return `<div style="padding:28px;text-align:center;color:#2a2a2a;font-family:monospace;font-size:12px;">Waiting for agent decisions...</div>`;
+  return state.globalDecisionLog.slice(0, 18).map(d => `
+    <div class="decision-row">
+      <div style="display:flex;justify-content:space-between;margin-bottom:4px;">
+        <span style="font-size:10px;color:#7c6af7;font-family:monospace;">${d.agentName}</span>
+        <span style="font-size:8px;color:#2a2a2a;font-family:monospace;">${ago(d.timestamp)}</span>
+      </div>
+      <div style="font-size:10px;color:#666;font-family:monospace;line-height:1.5;">${d.reasoning}</div>
+      <div style="margin-top:4px;font-size:9px;color:${d.executed?'#00ff88':'#444'};font-family:monospace;">
+        ${d.executed ? '✓' : '○'} ${d.action}
+      </div>
+    </div>
+  `).join("");
+}
+
+render();
+</script>
+</body>
+</html>
