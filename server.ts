@@ -348,8 +348,6 @@ function wireHeartbeat(wss: WebSocketServer) {
 
 async function main(): Promise<void> {
   validateRuntimeConfig();
-  console.log("[server] Initializing agents...");
-  await buildAgents();
 
   const wss = new WebSocketServer({ port: PORT });
   wireHeartbeat(wss);
@@ -360,6 +358,15 @@ async function main(): Promise<void> {
   }, 60_000);
 
   console.log(`[server] WebSocket listening on ws://localhost:${PORT}`);
+
+  // Start initialization in background so healthchecks pass quickly.
+  void (async () => {
+    console.log("[server] Initializing agents...");
+    await buildAgents();
+    console.log("[server] Agents initialized.");
+  })().catch((err) => {
+    console.error("[server] Agent initialization failed:", err);
+  });
 
   wss.on("connection", async (ws) => {
     clients.add(ws);
