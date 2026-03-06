@@ -88,6 +88,27 @@ const commandTimestampsByClient = new WeakMap<WebSocket, number[]>();
 const aliveByClient = new WeakMap<WebSocket, boolean>();
 
 const startupTs = Date.now();
+
+function validateRuntimeConfig(): void {
+  const signerMode = process.env.AGENT_SIGNER_MODE || "local";
+  if (signerMode === "kms") {
+    if (!process.env.AGENT_KMS_KEY_ID) {
+      throw new Error("AGENT_SIGNER_MODE=kms but AGENT_KMS_KEY_ID is missing.");
+    }
+
+    const hasFilePath = Boolean(process.env.GOOGLE_APPLICATION_CREDENTIALS);
+    const hasInlineJson = Boolean(process.env.GOOGLE_APPLICATION_CREDENTIALS_JSON);
+    if (!hasFilePath && !hasInlineJson) {
+      throw new Error(
+        "KMS mode requires Google credentials. Set GOOGLE_APPLICATION_CREDENTIALS (file path) or GOOGLE_APPLICATION_CREDENTIALS_JSON."
+      );
+    }
+  }
+
+  if (!process.env.AGENT_WALLET_SECRET) {
+    throw new Error("AGENT_WALLET_SECRET is required.");
+  }
+}
 let txBroadcasts = 0;
 let decisionBroadcasts = 0;
 let alertsBroadcasts = 0;
@@ -326,6 +347,7 @@ function wireHeartbeat(wss: WebSocketServer) {
 }
 
 async function main(): Promise<void> {
+  validateRuntimeConfig();
   console.log("[server] Initializing agents...");
   await buildAgents();
 
