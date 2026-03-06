@@ -113,6 +113,8 @@ let txBroadcasts = 0;
 let decisionBroadcasts = 0;
 let alertsBroadcasts = 0;
 let commandsLastMinute = 0;
+let agentsReady = false;
+
 
 function isObject(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null;
@@ -241,12 +243,22 @@ async function handleCommand(msg: ClientMessage, ws?: WebSocket): Promise<void> 
     case "GET_STATE": {
       const snapshots: AgentSnapshot[] = [];
       for (const [, agent] of agents) snapshots.push(await getSnapshot(agent));
-      if (ws) sendToClient(ws, { type: "INIT", agents: snapshots });
-      else broadcast({ type: "INIT", agents: snapshots });
+      if (ws) {
+        sendToClient(ws, { type: "INIT", agents: snapshots });
+        if (!agentsReady) {
+          sendToClient(ws, { type: "ERROR", message: "Agents are initializing. State will refresh when ready." });
+        }
+      } else {
+        broadcast({ type: "INIT", agents: snapshots });
+      }
       return;
     }
 
     case "START_AGENT": {
+      if (!agentsReady) {
+        if (ws) sendToClient(ws, { type: "ERROR", message: "Agents are still initializing. Please try again in a few seconds." });
+        return;
+      }
       const agent = agents.get(msg.agentId);
       if (!agent) return;
       agent.start(async (status) => {
@@ -319,6 +331,10 @@ async function handleCommand(msg: ClientMessage, ws?: WebSocket): Promise<void> 
     }
 
     case "START_ALL": {
+      if (!agentsReady) {
+        if (ws) sendToClient(ws, { type: "ERROR", message: "Agents are still initializing. Please try again in a few seconds." });
+        return;
+      }
       for (const [id] of agents) await handleCommand({ type: "START_AGENT", agentId: id });
       return;
     }
@@ -363,6 +379,8 @@ async function main(): Promise<void> {
   void (async () => {
     console.log("[server] Initializing agents...");
     await buildAgents();
+    agentsReady = true;
+    await handleCommand({ type: "GET_STATE" });
     console.log("[server] Agents initialized.");
   })().catch((err) => {
     console.error("[server] Agent initialization failed:", err);
