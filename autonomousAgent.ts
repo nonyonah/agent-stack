@@ -323,14 +323,32 @@ export class AutonomousAgent {
   private async _fetchPythPrice(): Promise<{ price: number; publishTime: number }> {
     const baseUrl = (this.config.pythHermesUrl || "https://hermes.pyth.network").replace(/\/+$/, "");
     const feedId = this.config.pythPriceFeedId!;
-    const url = `${baseUrl}/v2/updates/price/latest?ids[]=${encodeURIComponent(feedId)}&parsed=true`;
+    const encodedFeed = encodeURIComponent(feedId);
+    const hasV2Suffix = /\/v2$/i.test(baseUrl);
+    const endpointCandidates = hasV2Suffix
+      ? [
+          `${baseUrl}/updates/price/latest?ids[]=${encodedFeed}&parsed=true`,
+          `${baseUrl.replace(/\/v2$/i, "")}/v2/updates/price/latest?ids[]=${encodedFeed}&parsed=true`,
+        ]
+      : [
+          `${baseUrl}/v2/updates/price/latest?ids[]=${encodedFeed}&parsed=true`,
+          `${baseUrl}/updates/price/latest?ids[]=${encodedFeed}&parsed=true`,
+        ];
 
     const result = await withRetry(async () => {
-      const res = await fetch(url, { method: "GET" });
-      if (!res.ok) {
-        throw new Error(`Hermes HTTP ${res.status}`);
+      let lastStatus: number | null = null;
+      for (const url of endpointCandidates) {
+        const res = await fetch(url, { method: "GET" });
+        if (res.status === 404) {
+          lastStatus = res.status;
+          continue;
+        }
+        if (!res.ok) {
+          throw new Error(`Hermes HTTP ${res.status}`);
+        }
+        return (await res.json()) as PythLatestPriceResponse;
       }
-      return (await res.json()) as PythLatestPriceResponse;
+      throw new Error(`Hermes HTTP ${lastStatus ?? 404}`);
     }, `${this.config.name}:pyth-read`, 3, 500);
 
     const entry = result.parsed?.[0]?.price;

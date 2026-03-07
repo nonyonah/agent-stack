@@ -125,27 +125,52 @@ async function validateOracleConfig(): Promise<void> {
     );
   }
 
-  const endpoint = `${hermesUrl}/v2/updates/price/latest?ids[]=${encodeURIComponent(feedId)}&parsed=true`;
-  let res: Response;
-  try {
-    res = await fetch(endpoint, { method: "GET" });
-  } catch (err) {
-    throw new Error(
-      `Failed to reach Pyth Hermes at ${hermesUrl}. Check PYTH_HERMES_URL/network egress. Root cause: ${String(err)}`
-    );
+  const encodedFeed = encodeURIComponent(feedId);
+  const base = hermesUrl.replace(/\/+$/, "");
+  const hasV2Suffix = /\/v2$/i.test(base);
+  const endpointCandidates = hasV2Suffix
+    ? [
+        `${base}/updates/price/latest?ids[]=${encodedFeed}&parsed=true`,
+        `${base.replace(/\/v2$/i, "")}/v2/updates/price/latest?ids[]=${encodedFeed}&parsed=true`,
+      ]
+    : [
+        `${base}/v2/updates/price/latest?ids[]=${encodedFeed}&parsed=true`,
+        `${base}/updates/price/latest?ids[]=${encodedFeed}&parsed=true`,
+      ];
+
+  let matched = false;
+  let lastStatus: number | null = null;
+  for (const endpoint of endpointCandidates) {
+    let res: Response;
+    try {
+      res = await fetch(endpoint, { method: "GET" });
+    } catch (err) {
+      throw new Error(
+        `Failed to reach Pyth Hermes at ${hermesUrl}. Check PYTH_HERMES_URL/network egress. Root cause: ${String(err)}`
+      );
+    }
+
+    if (res.status === 404) {
+      lastStatus = res.status;
+      continue;
+    }
+    if (!res.ok) {
+      throw new Error(
+        `Pyth Hermes validation failed (${res.status}) via ${endpoint}. Check PYTH_HERMES_URL/PYTH_PRICE_FEED_ID.`
+      );
+    }
+
+    const body = (await res.json()) as { parsed?: Array<{ id?: string; price?: { price?: string; expo?: number } }> };
+    const parsed = body.parsed?.[0];
+    if (parsed && parsed.id?.toLowerCase() === feedId.toLowerCase() && parsed.price?.price != null && parsed.price?.expo != null) {
+      matched = true;
+      break;
+    }
   }
 
-  if (!res.ok) {
+  if (!matched) {
     throw new Error(
-      `Pyth Hermes validation failed (${res.status}). Check PYTH_HERMES_URL/PYTH_PRICE_FEED_ID.`
-    );
-  }
-
-  const body = (await res.json()) as { parsed?: Array<{ id?: string; price?: { price?: string; expo?: number } }> };
-  const parsed = body.parsed?.[0];
-  if (!parsed || parsed.id?.toLowerCase() !== feedId.toLowerCase() || parsed.price?.price == null || parsed.price?.expo == null) {
-    throw new Error(
-      `PYTH_PRICE_FEED_ID "${feedId}" did not return a valid parsed price from Hermes.`
+      `Pyth Hermes validation failed (${lastStatus ?? "no match"}). Check PYTH_HERMES_URL/PYTH_PRICE_FEED_ID and whether PYTH_HERMES_URL already includes /v2.`
     );
   }
 
