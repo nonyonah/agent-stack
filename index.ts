@@ -331,6 +331,12 @@ export class AgentWallet {
     void this._persist();
   }
 
+  logCustomEvent(note: string, status: "pending" | "confirmed" | "failed" = "confirmed"): void {
+    this._addTx({ type: "custom", status, note });
+    this._trimLogs();
+    void this._persist();
+  }
+
   get publicKey(): string { return this.state.publicKey; }
   get id(): string { return this.state.id; }
   get name(): string { return this.state.name; }

@@ -109,6 +109,48 @@ function validateRuntimeConfig(): void {
     throw new Error("AGENT_WALLET_SECRET is required.");
   }
 }
+
+async function validateOracleConfig(): Promise<void> {
+  if (process.env.AGENT_ENABLE_ORACLE_READS !== "true") return;
+
+  const hermesUrl = (process.env.PYTH_HERMES_URL || "https://hermes.pyth.network").replace(/\/+$/, "");
+  const feedId = process.env.PYTH_PRICE_FEED_ID;
+
+  if (!feedId) {
+    throw new Error("AGENT_ENABLE_ORACLE_READS=true requires PYTH_PRICE_FEED_ID.");
+  }
+  if (!/^0x[0-9a-fA-F]{64}$/.test(feedId)) {
+    throw new Error(
+      `PYTH_PRICE_FEED_ID is malformed: "${feedId}". Expected 0x + 64 hex chars.`
+    );
+  }
+
+  const endpoint = `${hermesUrl}/v2/updates/price/latest?ids[]=${encodeURIComponent(feedId)}&parsed=true`;
+  let res: Response;
+  try {
+    res = await fetch(endpoint, { method: "GET" });
+  } catch (err) {
+    throw new Error(
+      `Failed to reach Pyth Hermes at ${hermesUrl}. Check PYTH_HERMES_URL/network egress. Root cause: ${String(err)}`
+    );
+  }
+
+  if (!res.ok) {
+    throw new Error(
+      `Pyth Hermes validation failed (${res.status}). Check PYTH_HERMES_URL/PYTH_PRICE_FEED_ID.`
+    );
+  }
+
+  const body = (await res.json()) as { parsed?: Array<{ id?: string; price?: { price?: string; expo?: number } }> };
+  const parsed = body.parsed?.[0];
+  if (!parsed || parsed.id?.toLowerCase() !== feedId.toLowerCase() || parsed.price?.price == null || parsed.price?.expo == null) {
+    throw new Error(
+      `PYTH_PRICE_FEED_ID "${feedId}" did not return a valid parsed price from Hermes.`
+    );
+  }
+
+  console.log(`[server] Oracle config validated for feed ${feedId.slice(0, 12)}...`);
+}
 let txBroadcasts = 0;
 let decisionBroadcasts = 0;
 let alertsBroadcasts = 0;
@@ -208,7 +250,7 @@ async function buildAgents(): Promise<void> {
   const configs = [
     { name: "alpha-01", strategy: "ACCUMULATE" as const, tickIntervalMs: 9000, minBalance: 0.1 },
     { name: "beta-02", strategy: "DISTRIBUTE" as const, tickIntervalMs: 11000, transferThreshold: 0.5, transferAmount: 0.1 },
-    { name: "gamma-03", strategy: "PATROL" as const, tickIntervalMs: 10000, enableDexSwaps: true },
+    { name: "gamma-03", strategy: "PATROL" as const, tickIntervalMs: 10000, enableDexSwaps: true, enableOracleReads: true, oraclePollEveryTicks: 2 },
   ];
 
   for (const cfg of configs) {
@@ -364,6 +406,7 @@ function wireHeartbeat(wss: WebSocketServer) {
 
 async function main(): Promise<void> {
   validateRuntimeConfig();
+  await validateOracleConfig();
 
   const wss = new WebSocketServer({ port: PORT });
   wireHeartbeat(wss);

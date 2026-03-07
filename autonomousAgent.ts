@@ -7,6 +7,10 @@ export interface AgentConfig extends AgentWalletConfig {
   peers?: string[];
   tickIntervalMs?: number;
   airdropCooldownMs?: number;
+  enableOracleReads?: boolean;
+  oraclePollEveryTicks?: number;
+  pythHermesUrl?: string;
+  pythPriceFeedId?: string;
   minBalance?: number;
   transferThreshold?: number;
   transferAmount?: number;
@@ -39,6 +43,10 @@ function isAirdropRateLimitedError(err: unknown): boolean {
     text.includes("faucet has run dry") ||
     text.includes("airdrop limit")
   );
+}
+
+interface PythLatestPriceResponse {
+  parsed?: Array<{ price?: { price?: string; expo?: number; publish_time?: number } }>;
 }
 
 async function withRetry<T>(
@@ -90,6 +98,13 @@ export class AutonomousAgent {
       splDecimals: 6,
       enableDexSwaps: false,
       airdropCooldownMs: Number(process.env.AGENT_AIRDROP_COOLDOWN_MS || 30 * 60 * 1000),
+      enableOracleReads: process.env.AGENT_ENABLE_ORACLE_READS === "true",
+      oraclePollEveryTicks: Number(process.env.AGENT_ORACLE_POLL_EVERY_TICKS || 3),
+      pythHermesUrl: process.env.PYTH_HERMES_URL || "https://hermes.pyth.network",
+      // BTC/USD feed id from Pyth docs examples; override with env as needed.
+      pythPriceFeedId:
+        process.env.PYTH_PRICE_FEED_ID ||
+        "0xe62df6c8b4a85fe1a67db0f46fecfc02ca1a96db59ff16f33a6ef8e619f76f4a",
       ...config,
     };
     this.wallet = new AgentWallet(this.config);
@@ -182,6 +197,8 @@ export class AutonomousAgent {
           await this._strategyPatrol(balance, guard);
           break;
       }
+
+      await this._observeOracleIfEnabled();
 
       this.consecutiveFailures = 0;
       this.onStatusChange?.(await this.getStatus());
@@ -282,6 +299,51 @@ export class AutonomousAgent {
     } else {
       await this._strategyAccumulate(balance, guard);
     }
+  }
+
+  private async _observeOracleIfEnabled(): Promise<void> {
+    if (!this.config.enableOracleReads) return;
+    const every = Math.max(1, this.config.oraclePollEveryTicks || 1);
+    if (this.tickCount % every !== 0) return;
+
+    try {
+      const { price, publishTime } = await this._fetchPythPrice();
+      const published = new Date(publishTime * 1000).toISOString();
+      const note = `Pyth oracle read: price=${price.toFixed(2)} USD at ${published}`;
+      this.wallet.logDecision(note, "oracle_read", true);
+      this.wallet.logCustomEvent(note, "confirmed");
+    } catch (err) {
+      const note = `Pyth oracle read failed: ${String(err)}`;
+      console.warn(`[${this.config.name}] ${note}`);
+      this.wallet.logDecision(note, "oracle_read_failed", false);
+      this.wallet.logCustomEvent(note, "failed");
+    }
+  }
+
+  private async _fetchPythPrice(): Promise<{ price: number; publishTime: number }> {
+    const baseUrl = (this.config.pythHermesUrl || "https://hermes.pyth.network").replace(/\/+$/, "");
+    const feedId = this.config.pythPriceFeedId!;
+    const url = `${baseUrl}/v2/updates/price/latest?ids[]=${encodeURIComponent(feedId)}&parsed=true`;
+
+    const result = await withRetry(async () => {
+      const res = await fetch(url, { method: "GET" });
+      if (!res.ok) {
+        throw new Error(`Hermes HTTP ${res.status}`);
+      }
+      return (await res.json()) as PythLatestPriceResponse;
+    }, `${this.config.name}:pyth-read`, 3, 500);
+
+    const entry = result.parsed?.[0]?.price;
+    if (!entry || entry.price == null || entry.expo == null || entry.publish_time == null) {
+      throw new Error("Hermes response missing parsed price fields");
+    }
+
+    const numeric = Number(entry.price) * Math.pow(10, entry.expo);
+    if (!Number.isFinite(numeric)) {
+      throw new Error("Hermes returned invalid price number");
+    }
+
+    return { price: numeric, publishTime: entry.publish_time };
   }
 }
 

@@ -13,6 +13,7 @@ Autonomous Solana agent wallet prototype with production-oriented controls.
 - SPL token transfer support (`transferSPL`)
 - Key rotation API (`rotateKeypair`)
 - GCP KMS Ed25519 signing integration (`AGENT_SIGNER_MODE=kms`)
+- Pyth protocol oracle reads with dashboard event logs (`oracle_read`)
 
 ## Run
 
@@ -64,3 +65,7 @@ In KMS mode:
 
 - On `mainnet-beta`, airdrop is disabled.
 - SPL transfer path requires token account readiness and mint/decimals config.
+- Optional Pyth reads:
+  - `AGENT_ENABLE_ORACLE_READS=true`
+  - `PYTH_HERMES_URL=https://hermes.pyth.network`
+  - `PYTH_PRICE_FEED_ID=<feed-id>`
