@@ -117,6 +117,10 @@ function validateRuntimeConfig(): void {
   if (!process.env.AGENT_WALLET_SECRET) {
     throw new Error("AGENT_WALLET_SECRET is required.");
   }
+
+  if (process.env.AGENT_ENABLE_USDC_TRANSFERS === "true" && !process.env.AGENT_USDC_MINT) {
+    throw new Error("AGENT_ENABLE_USDC_TRANSFERS=true requires AGENT_USDC_MINT.");
+  }
 }
 
 async function validateOracleConfig(): Promise<boolean> {
@@ -289,6 +293,11 @@ async function getSnapshot(agent: AutonomousAgent): Promise<AgentSnapshot> {
 async function buildAgents(): Promise<void> {
   const signerMode = process.env.AGENT_SIGNER_MODE || "local";
   const globalKmsKeyId = process.env.AGENT_KMS_KEY_ID;
+  const enableUsdcTransfers = process.env.AGENT_ENABLE_USDC_TRANSFERS === "true";
+  const usdcMint = process.env.AGENT_USDC_MINT;
+  const usdcDecimals = Number(process.env.AGENT_USDC_DECIMALS || 6);
+  const usdcTransferAmount = Number(process.env.AGENT_USDC_TRANSFER_AMOUNT || 0.1);
+  const baseMaxActionsPerTick = enableUsdcTransfers ? 2 : 1;
 
   const configs = [
     {
@@ -296,6 +305,7 @@ async function buildAgents(): Promise<void> {
       strategy: "ACCUMULATE" as const,
       tickIntervalMs: 9000,
       minBalance: 0.1,
+      maxActionsPerTick: baseMaxActionsPerTick,
       kmsKeyId: process.env.AGENT_KMS_KEY_ID_ALPHA || globalKmsKeyId,
     },
     {
@@ -304,6 +314,11 @@ async function buildAgents(): Promise<void> {
       tickIntervalMs: 11000,
       transferThreshold: 0.5,
       transferAmount: 0.1,
+      maxActionsPerTick: baseMaxActionsPerTick,
+      enableUsdcTransfers,
+      usdcMint,
+      usdcDecimals,
+      usdcTransferAmount,
       kmsKeyId: process.env.AGENT_KMS_KEY_ID_BETA || globalKmsKeyId,
     },
     {
@@ -313,6 +328,11 @@ async function buildAgents(): Promise<void> {
       enableDexSwaps: true,
       enableOracleReads: oracleReadsEnabled,
       oraclePollEveryTicks: 2,
+      maxActionsPerTick: baseMaxActionsPerTick,
+      enableUsdcTransfers,
+      usdcMint,
+      usdcDecimals,
+      usdcTransferAmount,
       kmsKeyId: process.env.AGENT_KMS_KEY_ID_GAMMA || globalKmsKeyId,
     },
   ];

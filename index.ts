@@ -266,6 +266,40 @@ export class AgentWallet {
     return sig;
   }
 
+  async getSPLBalance(mint: string, decimals: number): Promise<number> {
+    const owner = this._requirePublicKey();
+    const mintPk = new PublicKey(mint);
+    const ata = await getAssociatedTokenAddress(mintPk, owner);
+    const ataInfo = await this.connection.getAccountInfo(ata);
+    if (!ataInfo) return 0;
+
+    const raw = await this.connection.getTokenAccountBalance(ata, "confirmed");
+    const amount = Number(raw.value.amount);
+    return amount / Math.pow(10, decimals);
+  }
+
+  async transferUSDC(
+    toOwner: string,
+    amount: number,
+    mint: string = process.env.AGENT_USDC_MINT || "",
+    decimals: number = Number(process.env.AGENT_USDC_DECIMALS || 6)
+  ): Promise<TransactionSignature> {
+    if (!mint) {
+      throw new Error("USDC mint is not configured. Set AGENT_USDC_MINT.");
+    }
+    return this.transferSPL(mint, toOwner, amount, decimals);
+  }
+
+  async getUSDCBalance(
+    mint: string = process.env.AGENT_USDC_MINT || "",
+    decimals: number = Number(process.env.AGENT_USDC_DECIMALS || 6)
+  ): Promise<number> {
+    if (!mint) {
+      throw new Error("USDC mint is not configured. Set AGENT_USDC_MINT.");
+    }
+    return this.getSPLBalance(mint, decimals);
+  }
+
   async signAndSendRaw(transaction: Transaction): Promise<TransactionSignature> {
     const feePayer = this._requirePublicKey();
     const sig = await this._sendTransaction(transaction, feePayer);

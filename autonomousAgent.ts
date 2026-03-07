@@ -20,6 +20,10 @@ export interface AgentConfig extends AgentWalletConfig {
   enableSplTransfers?: boolean;
   splMint?: string;
   splDecimals?: number;
+  enableUsdcTransfers?: boolean;
+  usdcMint?: string;
+  usdcDecimals?: number;
+  usdcTransferAmount?: number;
   enableDexSwaps?: boolean;
 }
 
@@ -96,6 +100,10 @@ export class AutonomousAgent {
       maxTransferPerTick: 0.25,
       enableSplTransfers: false,
       splDecimals: 6,
+      enableUsdcTransfers: process.env.AGENT_ENABLE_USDC_TRANSFERS === "true",
+      usdcMint: process.env.AGENT_USDC_MINT,
+      usdcDecimals: Number(process.env.AGENT_USDC_DECIMALS || 6),
+      usdcTransferAmount: Number(process.env.AGENT_USDC_TRANSFER_AMOUNT || 0.1),
       enableDexSwaps: false,
       airdropCooldownMs: Number(process.env.AGENT_AIRDROP_COOLDOWN_MS || 30 * 60 * 1000),
       enableOracleReads: process.env.AGENT_ENABLE_ORACLE_READS === "true",
@@ -251,6 +259,37 @@ export class AutonomousAgent {
           2,
           900
         );
+      }
+
+      if (this.config.enableUsdcTransfers && this.config.usdcMint) {
+        const usdcAmount = this.config.usdcTransferAmount || 0.1;
+        const usdcDecimals = this.config.usdcDecimals || 6;
+        const usdcBalance = await withRetry(
+          () => this.wallet.getUSDCBalance(this.config.usdcMint, usdcDecimals),
+          `${this.config.name}:usdc_balance`,
+          2,
+          700
+        );
+        if (usdcBalance >= usdcAmount) {
+          this.wallet.logDecision(
+            `USDC mode enabled. Sending ${usdcAmount} USDC to peer ${target.slice(0, 8)}...`,
+            "usdc_transfer",
+            true
+          );
+          guard();
+          await withRetry(
+            () => this.wallet.transferUSDC(target, usdcAmount, this.config.usdcMint, usdcDecimals),
+            `${this.config.name}:usdc_transfer`,
+            3,
+            900
+          );
+        } else {
+          this.wallet.logDecision(
+            `USDC transfer skipped. Wallet USDC balance ${usdcBalance.toFixed(4)} is below required ${usdcAmount}.`,
+            "usdc_skip_low_balance",
+            false
+          );
+        }
       }
     } else if (balance < this.config.minBalance!) {
       this.wallet.logDecision(`Balance too low to distribute. Requesting airdrop.`, "airdrop", true);

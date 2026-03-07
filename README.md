@@ -11,6 +11,7 @@ Autonomous Solana agent wallet prototype with production-oriented controls.
 - WebSocket auth, validation, heartbeat, command rate limits
 - Runtime alerts + metrics stream for observability
 - SPL token transfer support (`transferSPL`)
+- USDC transfer support (`transferUSDC`)
 - Key rotation API (`rotateKeypair`)
 - GCP KMS Ed25519 signing integration (`AGENT_SIGNER_MODE=kms`)
 - Pyth protocol oracle reads with dashboard event logs (`oracle_read`)
@@ -65,6 +66,11 @@ In KMS mode:
 
 - On `mainnet-beta`, airdrop is disabled.
 - SPL transfer path requires token account readiness and mint/decimals config.
+- Optional USDC transfers:
+  - `AGENT_ENABLE_USDC_TRANSFERS=true`
+  - `AGENT_USDC_MINT=<usdc-mint>`
+  - `AGENT_USDC_DECIMALS=6`
+  - `AGENT_USDC_TRANSFER_AMOUNT=0.1`
 - Optional Pyth reads:
   - `AGENT_ENABLE_ORACLE_READS=true`
   - `PYTH_HERMES_URL=https://hermes.pyth.network`
