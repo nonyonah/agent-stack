@@ -94,8 +94,15 @@ const startupTs = Date.now();
 function validateRuntimeConfig(): void {
   const signerMode = process.env.AGENT_SIGNER_MODE || "local";
   if (signerMode === "kms") {
-    if (!process.env.AGENT_KMS_KEY_ID) {
-      throw new Error("AGENT_SIGNER_MODE=kms but AGENT_KMS_KEY_ID is missing.");
+    const hasAnyKmsKey =
+      Boolean(process.env.AGENT_KMS_KEY_ID) ||
+      Boolean(process.env.AGENT_KMS_KEY_ID_ALPHA) ||
+      Boolean(process.env.AGENT_KMS_KEY_ID_BETA) ||
+      Boolean(process.env.AGENT_KMS_KEY_ID_GAMMA);
+    if (!hasAnyKmsKey) {
+      throw new Error(
+        "AGENT_SIGNER_MODE=kms but no KMS key ID is configured. Set AGENT_KMS_KEY_ID or per-agent AGENT_KMS_KEY_ID_ALPHA/BETA/GAMMA."
+      );
     }
 
     const hasFilePath = Boolean(process.env.GOOGLE_APPLICATION_CREDENTIALS);
@@ -280,9 +287,25 @@ async function getSnapshot(agent: AutonomousAgent): Promise<AgentSnapshot> {
 }
 
 async function buildAgents(): Promise<void> {
+  const signerMode = process.env.AGENT_SIGNER_MODE || "local";
+  const globalKmsKeyId = process.env.AGENT_KMS_KEY_ID;
+
   const configs = [
-    { name: "alpha-01", strategy: "ACCUMULATE" as const, tickIntervalMs: 9000, minBalance: 0.1 },
-    { name: "beta-02", strategy: "DISTRIBUTE" as const, tickIntervalMs: 11000, transferThreshold: 0.5, transferAmount: 0.1 },
+    {
+      name: "alpha-01",
+      strategy: "ACCUMULATE" as const,
+      tickIntervalMs: 9000,
+      minBalance: 0.1,
+      kmsKeyId: process.env.AGENT_KMS_KEY_ID_ALPHA || globalKmsKeyId,
+    },
+    {
+      name: "beta-02",
+      strategy: "DISTRIBUTE" as const,
+      tickIntervalMs: 11000,
+      transferThreshold: 0.5,
+      transferAmount: 0.1,
+      kmsKeyId: process.env.AGENT_KMS_KEY_ID_BETA || globalKmsKeyId,
+    },
     {
       name: "gamma-03",
       strategy: "PATROL" as const,
@@ -290,10 +313,14 @@ async function buildAgents(): Promise<void> {
       enableDexSwaps: true,
       enableOracleReads: oracleReadsEnabled,
       oraclePollEveryTicks: 2,
+      kmsKeyId: process.env.AGENT_KMS_KEY_ID_GAMMA || globalKmsKeyId,
     },
   ];
 
   for (const cfg of configs) {
+    if (signerMode === "kms" && !cfg.kmsKeyId) {
+      throw new Error(`[server] ${cfg.name} has no KMS key ID configured.`);
+    }
     const agent = new AutonomousAgent(cfg);
     await agent.init();
     agents.set(agent.getWallet().id, agent);
@@ -301,6 +328,9 @@ async function buildAgents(): Promise<void> {
   }
 
   const pubkeys = [...agents.values()].map((a) => a.getWallet().publicKey);
+  if (new Set(pubkeys).size !== pubkeys.length) {
+    console.warn("[server] Duplicate agent public keys detected. In KMS mode this usually means all agents share one KMS key and cannot peer-transfer.");
+  }
   for (const [, agent] of agents) {
     agent.setPeers(pubkeys.filter((p) => p !== agent.getWallet().publicKey));
   }

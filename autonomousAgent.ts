@@ -256,6 +256,12 @@ export class AutonomousAgent {
       this.wallet.logDecision(`Balance too low to distribute. Requesting airdrop.`, "airdrop", true);
       guard();
       await this._tryAirdrop(1, `${this.config.name}:airdrop`);
+    } else if (peers.length === 0) {
+      this.wallet.logDecision(
+        `Balance ${balance.toFixed(4)} SOL is above threshold, but no peer wallets are configured. Distribution is skipped.`,
+        "wait_no_peers",
+        false
+      );
     } else {
       this.wallet.logDecision(`Balance ${balance.toFixed(4)} SOL is below threshold. Waiting to accumulate.`, "wait", false);
     }
