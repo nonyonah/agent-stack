@@ -10,6 +10,8 @@ const WS_AUTH_TOKEN = process.env.WS_AUTH_TOKEN;
 const MAX_COMMANDS_PER_MIN = Number(process.env.WS_MAX_COMMANDS_PER_MIN || 120);
 const HEARTBEAT_MS = Number(process.env.WS_HEARTBEAT_MS || 20000);
 const ALERT_BALANCE_DROP_SOL = Number(process.env.ALERT_BALANCE_DROP_SOL || 0.5);
+const ORACLE_READS_REQUESTED = process.env.AGENT_ENABLE_ORACLE_READS === "true";
+let oracleReadsEnabled = false;
 
 type AgentStrategy = "ACCUMULATE" | "DISTRIBUTE" | "PATROL";
 
@@ -110,19 +112,19 @@ function validateRuntimeConfig(): void {
   }
 }
 
-async function validateOracleConfig(): Promise<void> {
-  if (process.env.AGENT_ENABLE_ORACLE_READS !== "true") return;
+async function validateOracleConfig(): Promise<boolean> {
+  if (!ORACLE_READS_REQUESTED) return false;
 
   const hermesUrl = (process.env.PYTH_HERMES_URL || "https://hermes.pyth.network").replace(/\/+$/, "");
   const feedId = process.env.PYTH_PRICE_FEED_ID;
 
   if (!feedId) {
-    throw new Error("AGENT_ENABLE_ORACLE_READS=true requires PYTH_PRICE_FEED_ID.");
+    console.warn("[server] Oracle disabled: AGENT_ENABLE_ORACLE_READS=true requires PYTH_PRICE_FEED_ID.");
+    return false;
   }
   if (!/^0x[0-9a-fA-F]{64}$/.test(feedId)) {
-    throw new Error(
-      `PYTH_PRICE_FEED_ID is malformed: "${feedId}". Expected 0x + 64 hex chars.`
-    );
+    console.warn(`[server] Oracle disabled: PYTH_PRICE_FEED_ID is malformed: "${feedId}". Expected 0x + 64 hex chars.`);
+    return false;
   }
 
   const encodedFeed = encodeURIComponent(feedId);
@@ -145,9 +147,12 @@ async function validateOracleConfig(): Promise<void> {
     try {
       res = await fetch(endpoint, { method: "GET" });
     } catch (err) {
-      throw new Error(
-        `Failed to reach Pyth Hermes at ${hermesUrl}. Check PYTH_HERMES_URL/network egress. Root cause: ${String(err)}`
+      console.warn(
+        `[server] Oracle disabled: Failed to reach Pyth Hermes at ${hermesUrl}. Check PYTH_HERMES_URL/network egress. Root cause: ${String(
+          err
+        )}`
       );
+      return false;
     }
 
     if (res.status === 404) {
@@ -155,9 +160,10 @@ async function validateOracleConfig(): Promise<void> {
       continue;
     }
     if (!res.ok) {
-      throw new Error(
-        `Pyth Hermes validation failed (${res.status}) via ${endpoint}. Check PYTH_HERMES_URL/PYTH_PRICE_FEED_ID.`
+      console.warn(
+        `[server] Oracle disabled: Pyth Hermes validation failed (${res.status}) via ${endpoint}. Check PYTH_HERMES_URL/PYTH_PRICE_FEED_ID.`
       );
+      return false;
     }
 
     const body = (await res.json()) as { parsed?: Array<{ id?: string; price?: { price?: string; expo?: number } }> };
@@ -169,12 +175,14 @@ async function validateOracleConfig(): Promise<void> {
   }
 
   if (!matched) {
-    throw new Error(
-      `Pyth Hermes validation failed (${lastStatus ?? "no match"}). Check PYTH_HERMES_URL/PYTH_PRICE_FEED_ID and whether PYTH_HERMES_URL already includes /v2.`
+    console.warn(
+      `[server] Oracle disabled: Pyth Hermes validation failed (${lastStatus ?? "no match"}). Check PYTH_HERMES_URL/PYTH_PRICE_FEED_ID and whether PYTH_HERMES_URL already includes /v2.`
     );
+    return false;
   }
 
   console.log(`[server] Oracle config validated for feed ${feedId.slice(0, 12)}...`);
+  return true;
 }
 let txBroadcasts = 0;
 let decisionBroadcasts = 0;
@@ -275,7 +283,14 @@ async function buildAgents(): Promise<void> {
   const configs = [
     { name: "alpha-01", strategy: "ACCUMULATE" as const, tickIntervalMs: 9000, minBalance: 0.1 },
     { name: "beta-02", strategy: "DISTRIBUTE" as const, tickIntervalMs: 11000, transferThreshold: 0.5, transferAmount: 0.1 },
-    { name: "gamma-03", strategy: "PATROL" as const, tickIntervalMs: 10000, enableDexSwaps: true, enableOracleReads: true, oraclePollEveryTicks: 2 },
+    {
+      name: "gamma-03",
+      strategy: "PATROL" as const,
+      tickIntervalMs: 10000,
+      enableDexSwaps: true,
+      enableOracleReads: oracleReadsEnabled,
+      oraclePollEveryTicks: 2,
+    },
   ];
 
   for (const cfg of configs) {
@@ -431,7 +446,7 @@ function wireHeartbeat(wss: WebSocketServer) {
 
 async function main(): Promise<void> {
   validateRuntimeConfig();
-  await validateOracleConfig();
+  oracleReadsEnabled = await validateOracleConfig();
 
   const wss = new WebSocketServer({ port: PORT });
   wireHeartbeat(wss);
