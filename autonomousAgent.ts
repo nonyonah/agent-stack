@@ -6,6 +6,7 @@ export interface AgentConfig extends AgentWalletConfig {
   strategy: AgentStrategy;
   peers?: string[];
   tickIntervalMs?: number;
+  airdropCooldownMs?: number;
   minBalance?: number;
   transferThreshold?: number;
   transferAmount?: number;
@@ -30,17 +31,35 @@ export interface AgentStatus {
   consecutiveFailures: number;
 }
 
-async function withRetry<T>(fn: () => Promise<T>, label: string, retries = 3, delayMs = 600): Promise<T> {
+function isAirdropRateLimitedError(err: unknown): boolean {
+  const text = String(err).toLowerCase();
+  return (
+    text.includes("429") ||
+    text.includes("too many requests") ||
+    text.includes("faucet has run dry") ||
+    text.includes("airdrop limit")
+  );
+}
+
+async function withRetry<T>(
+  fn: () => Promise<T>,
+  label: string,
+  retries = 3,
+  delayMs = 600,
+  shouldRetry: (err: unknown) => boolean = () => true
+): Promise<T> {
   let lastErr: unknown;
   for (let i = 0; i < retries; i++) {
     try {
       return await fn();
     } catch (err) {
       lastErr = err;
-      if (i < retries - 1) {
+      if (i < retries - 1 && shouldRetry(err)) {
         const waitMs = delayMs * Math.pow(2, i);
         console.warn(`[retry] ${label} failed (attempt ${i + 1}/${retries}). waiting ${waitMs}ms`);
         await new Promise((r) => setTimeout(r, waitMs));
+      } else {
+        break;
       }
     }
   }
@@ -54,6 +73,7 @@ export class AutonomousAgent {
   private tickInFlight = false;
   private isRunning = false;
   private consecutiveFailures = 0;
+  private airdropCooldownUntil = 0;
   private intervalHandle: NodeJS.Timeout | null = null;
   private onStatusChange?: (status: AgentStatus) => void;
 
@@ -69,6 +89,7 @@ export class AutonomousAgent {
       enableSplTransfers: false,
       splDecimals: 6,
       enableDexSwaps: false,
+      airdropCooldownMs: Number(process.env.AGENT_AIRDROP_COOLDOWN_MS || 30 * 60 * 1000),
       ...config,
     };
     this.wallet = new AgentWallet(this.config);
@@ -86,8 +107,7 @@ export class AutonomousAgent {
     }
     console.log(`[${this.config.name}] Requesting devnet airdrop...`);
     try {
-      const sig = await withRetry(() => this.wallet.airdrop(1), `${this.config.name}:bootstrap-airdrop`, 3, 700);
-      console.log(`[${this.config.name}] Airdrop confirmed: ${sig}`);
+      await this._tryAirdrop(1, `${this.config.name}:bootstrap-airdrop`);
     } catch (e) {
       console.warn(`[${this.config.name}] Airdrop failed: ${String(e)}`);
     }
@@ -185,7 +205,7 @@ export class AutonomousAgent {
         true
       );
       guard();
-      await withRetry(() => this.wallet.airdrop(0.5), `${this.config.name}:airdrop`, 3, 800);
+      await this._tryAirdrop(0.5, `${this.config.name}:airdrop`);
     } else {
       this.wallet.logDecision(`Balance ${balance.toFixed(4)} SOL is healthy. Holding position.`, "hold", false);
     }
@@ -218,9 +238,36 @@ export class AutonomousAgent {
     } else if (balance < this.config.minBalance!) {
       this.wallet.logDecision(`Balance too low to distribute. Requesting airdrop.`, "airdrop", true);
       guard();
-      await withRetry(() => this.wallet.airdrop(1), `${this.config.name}:airdrop`, 3, 800);
+      await this._tryAirdrop(1, `${this.config.name}:airdrop`);
     } else {
       this.wallet.logDecision(`Balance ${balance.toFixed(4)} SOL is below threshold. Waiting to accumulate.`, "wait", false);
+    }
+  }
+
+  private async _tryAirdrop(solAmount: number, label: string): Promise<string | null> {
+    if (Date.now() < this.airdropCooldownUntil) {
+      const waitSec = Math.ceil((this.airdropCooldownUntil - Date.now()) / 1000);
+      this.wallet.logDecision(`Faucet cooldown active (${waitSec}s remaining). Skipping airdrop request.`, "airdrop_cooldown", false);
+      return null;
+    }
+
+    try {
+      const sig = await withRetry(
+        () => this.wallet.airdrop(solAmount),
+        label,
+        3,
+        700,
+        (err) => !isAirdropRateLimitedError(err)
+      );
+      console.log(`[${this.config.name}] Airdrop confirmed: ${sig}`);
+      return sig;
+    } catch (err) {
+      if (!isAirdropRateLimitedError(err)) throw err;
+      this.airdropCooldownUntil = Date.now() + this.config.airdropCooldownMs!;
+      const untilIso = new Date(this.airdropCooldownUntil).toISOString();
+      console.warn(`[${this.config.name}] Devnet faucet rate-limited. Cooling down airdrops until ${untilIso}.`);
+      this.wallet.logDecision(`Devnet faucet rate-limited. Entering cooldown until ${untilIso}.`, "airdrop_cooldown", false);
+      return null;
     }
   }
 
